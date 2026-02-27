@@ -7,6 +7,8 @@
 #include <iostream>
 #include "RadarEgoVelConfig.hpp"
 #include <random>
+#include <limits>
+#include <numeric>
 namespace rio {
 
   // Define a type alias for a vector of size 11
@@ -109,6 +111,17 @@ namespace rio {
     const double roll,
     Eigen::Vector3d& v_r
     );
+
+    static double medianFromVector(std::vector<double> values) {
+      if (values.empty()) return 0.0;
+      const size_t mid = values.size() / 2;
+      std::nth_element(values.begin(), values.begin() + mid, values.end());
+      if (values.size() % 2 == 1) return values[mid];
+      const double upper = values[mid];
+      std::nth_element(values.begin(), values.begin() + mid - 1, values.end());
+      const double lower = values[mid - 1];
+      return 0.5 * (lower + upper);
+    }
   };
 
   // Implementation of the estimate function
@@ -220,11 +233,25 @@ namespace rio {
           );
         std::vector<uint> inlier_idx_best;
         std::vector<uint> outlier_idx_best;
-         // Perform RANSAC-based estimation
-        success = solve3DFullRansac(
-          radar_data, pitch, roll, yaw, is_holonomic, is_ground,
-          v_r, sigma_v_r, inlier_idx_best, outlier_idx_best
-        );
+        if (config_.use_ransac) {
+          // Perform RANSAC-based estimation
+          success = solve3DFullRansac(
+            radar_data, pitch, roll, yaw, is_holonomic, is_ground,
+            v_r, sigma_v_r, inlier_idx_best, outlier_idx_best
+          );
+        } else {
+          if (!is_holonomic) {
+            success = solve3DFull_not_holonomic(radar_data, pitch, roll, yaw, v_r);
+          } else if (!is_ground) {
+            success = solve3DFull_holonomic(radar_data, pitch, roll, v_r);
+          } else {
+            success = solve3DGround_holonomic(radar_data, pitch, roll, v_r);
+          }
+          if (success) {
+            inlier_idx_best.resize(radar_data.rows());
+            std::iota(inlier_idx_best.begin(), inlier_idx_best.end(), 0);
+          }
+        }
 
         RCLCPP_INFO(rclcpp::get_logger("RadarEgoVel"),
         "  RANSAC returned %s, inliers=%zu, outliers=%zu",
@@ -286,6 +313,7 @@ bool RadarEgoVel::solve3DFullRansac(const Eigen::MatrixXd& radar_data, const dou
     std::mt19937 g(rd());
 
     // Only proceed if there are enough points to perform RANSAC
+    double best_median_err = std::numeric_limits<double>::infinity();
     if (radar_data.rows() >= config_.N_ransac_points) {
         for (uint k = 0; k < ransac_iter_; ++k) {
             std::shuffle(idx.begin(), idx.end(), g);
@@ -323,28 +351,37 @@ bool RadarEgoVel::solve3DFullRansac(const Eigen::MatrixXd& radar_data, const dou
                     }
                 }
 
+                std::vector<double> err_values(err.data(), err.data() + err.size());
+                const double median_err = medianFromVector(err_values);
+                for (auto& e : err_values) e = std::fabs(e - median_err);
+                const double mad = medianFromVector(err_values);
+                const double adaptive_thresh = std::max(
+                  static_cast<double>(config_.inlier_thresh),
+                  static_cast<double>(config_.ransac_mad_scale) * 1.4826 * mad
+                );
+
                 // Identification of inliers and outliers
                 std::vector<uint> inlier_idx;
                 std::vector<uint> outlier_idx;
                 for (uint j = 0; j < err.rows(); ++j) {
-                    if (err(j) < config_.inlier_thresh)
+                    if (err(j) < adaptive_thresh)
                         inlier_idx.emplace_back(j);
                     else
                         outlier_idx.emplace_back(j);
                 }
 
-                // Adjust to limit the proportion of outliers
-                if (float(outlier_idx.size()) / (inlier_idx.size() + outlier_idx.size()) > 0.05) {
-                    inlier_idx.insert(inlier_idx.end(), outlier_idx.begin(), outlier_idx.end());
-                    outlier_idx.clear();
-                }
+                const double inlier_ratio = static_cast<double>(inlier_idx.size()) / static_cast<double>(radar_data.rows());
+                const bool enough_inliers =
+                  inlier_idx.size() >= static_cast<size_t>(config_.min_inlier_count) &&
+                  inlier_ratio >= static_cast<double>(config_.min_inlier_ratio);
 
                 // Update the best inlier and outlier indices
-                if (inlier_idx.size() > inlier_idx_best.size()) {
+                if (enough_inliers &&
+                    (inlier_idx.size() > inlier_idx_best.size() ||
+                     (inlier_idx.size() == inlier_idx_best.size() && median_err < best_median_err))) {
                     inlier_idx_best = inlier_idx;
-                }
-                if (outlier_idx.size() > outlier_idx_best.size()) {
                     outlier_idx_best = outlier_idx;
+                    best_median_err = median_err;
                 }
             }
         }
@@ -370,6 +407,9 @@ bool RadarEgoVel::solve3DFullRansac(const Eigen::MatrixXd& radar_data, const dou
         //  "[RANSAC] About to return final rtn=%s (inliers=%zu)",
         //  rtn ? "true" : "false",
         //  inlier_idx_best.size());
+        if (rtn) {
+          sigma_v_r = Eigen::Vector3d::Constant(best_median_err);
+        }
         return rtn;
     }
 

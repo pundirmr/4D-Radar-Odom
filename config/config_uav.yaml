@@ -4,6 +4,19 @@ uav_radar_pcl_processor:
     radar_topic: "/drone/radar/PointCloudDetection" # Radar topic
     holonomic_vehicle: true            # Holonomic ground Vehicle (true/false)
     ground_vehicle: false # this is used to apply the motion constraints in holonomic case
+    use_accel_consistency_gate: true
+    imu_accel_has_gravity: true
+    accel_lpf_alpha: 0.20
+    accel_consistency_gain: 3.0
+    accel_consistency_bias: 0.25
+    accel_max_norm: 8.0
+    accel_gate_dt_min: 0.02
+    accel_gate_dt_max: 0.30
+    use_velocity_sanity_gate: true
+    max_speed_norm: 5.0
+    max_speed_x: 2.5
+    max_speed_y: 2.5
+    max_speed_z: 2.5
     imu_to_base_link: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0] # x y z r p y 
     radar_to_base_link: [-0.385, -0.02, -0.225, 0.0, 0.725, 3.142] # [-0.385 -0.02 -0.225 0.0 2.417 3.1416]
 
@@ -13,19 +26,19 @@ uav_radar_pcl_processor:
     enable_dynamic_object_removal: true # Remove dynamic objects
 
     #Distance filter thresholds
-    distance_near_thresh: 0.1
-    distance_far_thresh: 80.0
-    z_low_thresh: -40.0
+    distance_near_thresh: 0.5
+    distance_far_thresh: 100.0
+    z_low_thresh: -20.0
     z_high_thresh: 100.0
 
     #Ego velocity estimator thresholds/params
     min_dist: 0.5
-    max_dist: 400.0
-    min_db: -15.0 #RCS
-    elevation_thresh_deg: 60.00
-    azimuth_thresh_deg: 120.0 #minimum, up to 180 because the radar points backward
+    max_dist: 100.0
+    min_db: -5.0 #RCS
+    elevation_thresh_deg: 65.0
+    azimuth_thresh_deg: 115.0 # 120.0 minimum -5 of margin, up to 180 because the radar points backward
     doppler_velocity_correction_factor: 1.0
-    thresh_zero_velocity: 0.01
+    thresh_zero_velocity: 0.02
     allowed_outlier_percentage: 0.30
     sigma_zero_velocity_x: 1.0e-03
     sigma_zero_velocity_y: 3.2e-03
@@ -37,10 +50,15 @@ uav_radar_pcl_processor:
     max_sigma_y: 0.2
     max_sigma_z: 0.2
     max_r_cond: 0.2
-    outlier_prob: 0.25
-    success_prob: 0.95
-    N_ransac_points: 3.0
-    inlier_thresh: 1.0
+    use_cholesky_instead_of_bdcsvd: true
+    use_ransac: true
+    outlier_prob: 0.35
+    success_prob: 0.995
+    N_ransac_points: 5.0
+    inlier_thresh: 0.24
+    min_inlier_ratio: 0.50
+    min_inlier_count: 10.0
+    ransac_mad_scale: 2.6
     
 uav_optimizer:
   ros__parameters:

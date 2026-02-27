@@ -14,6 +14,7 @@
 #include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 #include <tf2/LinearMath/Transform.h>
 #include <sensor_msgs/point_cloud2_iterator.hpp>
+#include <algorithm>
 
 
 // RadarPclProcessor class handles point cloud processing, transformation between sensor frames,
@@ -40,6 +41,19 @@ private:
         this->declare_parameter<bool>("holonomic_vehicle", true);
         this->declare_parameter<bool>("ground_vehicle", true);
         this->declare_parameter<bool>("enable_dynamic_object_removal", true);
+        this->declare_parameter<bool>("use_accel_consistency_gate", false);
+        this->declare_parameter<bool>("imu_accel_has_gravity", true);
+        this->declare_parameter<double>("accel_lpf_alpha", 0.2);
+        this->declare_parameter<double>("accel_consistency_gain", 2.5);
+        this->declare_parameter<double>("accel_consistency_bias", 0.15);
+        this->declare_parameter<double>("accel_max_norm", 8.0);
+        this->declare_parameter<double>("accel_gate_dt_min", 0.02);
+        this->declare_parameter<double>("accel_gate_dt_max", 0.25);
+        this->declare_parameter<bool>("use_velocity_sanity_gate", true);
+        this->declare_parameter<double>("max_speed_norm", 6.0);
+        this->declare_parameter<double>("max_speed_x", 6.0);
+        this->declare_parameter<double>("max_speed_y", 6.0);
+        this->declare_parameter<double>("max_speed_z", 4.0);
 
         // frame poses [x, y, z, roll, pitch, yaw]
         this->declare_parameter<std::vector<double>>(
@@ -80,6 +94,11 @@ private:
         this->declare_parameter<double>("success_prob", 0.995);
         this->declare_parameter<double>("N_ransac_points", 5.0);
         this->declare_parameter<double>("inlier_thresh", 0.5);
+        this->declare_parameter<double>("min_inlier_ratio", 0.60);
+        this->declare_parameter<double>("min_inlier_count", 10.0);
+        this->declare_parameter<double>("ransac_mad_scale", 2.5);
+        this->declare_parameter<bool>("use_cholesky_instead_of_bdcsvd", true);
+        this->declare_parameter<bool>("use_ransac", true);
     }
     // Function to load parameters from the ROS2 parameter server.
     void getParams() {
@@ -91,6 +110,19 @@ private:
         this->get_parameter("enable_dynamic_object_removal", enable_dynamic_object_removal_);
         this->get_parameter("holonomic_vehicle", holonomic_vehicle_);
         this->get_parameter("ground_vehicle", ground_vehicle_);
+        this->get_parameter("use_accel_consistency_gate", use_accel_consistency_gate_);
+        this->get_parameter("imu_accel_has_gravity", imu_accel_has_gravity_);
+        this->get_parameter("accel_lpf_alpha", accel_lpf_alpha_);
+        this->get_parameter("accel_consistency_gain", accel_consistency_gain_);
+        this->get_parameter("accel_consistency_bias", accel_consistency_bias_);
+        this->get_parameter("accel_max_norm", accel_max_norm_);
+        this->get_parameter("accel_gate_dt_min", accel_gate_dt_min_);
+        this->get_parameter("accel_gate_dt_max", accel_gate_dt_max_);
+        this->get_parameter("use_velocity_sanity_gate", use_velocity_sanity_gate_);
+        this->get_parameter("max_speed_norm", max_speed_norm_);
+        this->get_parameter("max_speed_x", max_speed_x_);
+        this->get_parameter("max_speed_y", max_speed_y_);
+        this->get_parameter("max_speed_z", max_speed_z_);
         this->get_parameter("distance_near_thresh", distance_near_thresh_);
         this->get_parameter("distance_far_thresh", distance_far_thresh_);
         this->get_parameter("z_low_thresh", z_low_thresh_);
@@ -123,6 +155,9 @@ private:
         this->get_parameter("success_prob", config.success_prob);
         this->get_parameter("N_ransac_points", config.N_ransac_points);
         this->get_parameter("inlier_thresh", config.inlier_thresh);
+        this->get_parameter("min_inlier_ratio", config.min_inlier_ratio);
+        this->get_parameter("min_inlier_count", config.min_inlier_count);
+        this->get_parameter("ransac_mad_scale", config.ransac_mad_scale);
 
         // Initialize the radar ego-velocity estimator with the retrieved configuration
         estimator_ = std::make_shared<rio::RadarEgoVel>(config);
@@ -138,6 +173,22 @@ private:
 
         RCLCPP_INFO(get_logger(), "ground_vehicle: %s",
                     ground_vehicle_ ? "true" : "false");
+        RCLCPP_INFO(get_logger(), "use_accel_consistency_gate: %s",
+                    use_accel_consistency_gate_ ? "true" : "false");
+        RCLCPP_INFO(get_logger(), "imu_accel_has_gravity: %s",
+                    imu_accel_has_gravity_ ? "true" : "false");
+        RCLCPP_INFO(get_logger(), "accel_lpf_alpha: %.3f", accel_lpf_alpha_);
+        RCLCPP_INFO(get_logger(), "accel_consistency_gain: %.3f", accel_consistency_gain_);
+        RCLCPP_INFO(get_logger(), "accel_consistency_bias: %.3f", accel_consistency_bias_);
+        RCLCPP_INFO(get_logger(), "accel_max_norm: %.3f", accel_max_norm_);
+        RCLCPP_INFO(get_logger(), "accel_gate_dt_min: %.3f", accel_gate_dt_min_);
+        RCLCPP_INFO(get_logger(), "accel_gate_dt_max: %.3f", accel_gate_dt_max_);
+        RCLCPP_INFO(get_logger(), "use_velocity_sanity_gate: %s",
+                    use_velocity_sanity_gate_ ? "true" : "false");
+        RCLCPP_INFO(get_logger(), "max_speed_norm: %.3f", max_speed_norm_);
+        RCLCPP_INFO(get_logger(), "max_speed_x: %.3f", max_speed_x_);
+        RCLCPP_INFO(get_logger(), "max_speed_y: %.3f", max_speed_y_);
+        RCLCPP_INFO(get_logger(), "max_speed_z: %.3f", max_speed_z_);
 
         auto printVec6 = [&](const std::string &name, const std::vector<double> &v) {
         if (v.size() == 6) {
@@ -181,6 +232,9 @@ private:
         RCLCPP_INFO(get_logger(), "success_prob:                    %.3f", config.success_prob);
         RCLCPP_INFO(get_logger(), "N_ransac_points:                 %.1f", config.N_ransac_points);
         RCLCPP_INFO(get_logger(), "inlier_thresh:                   %.3f", config.inlier_thresh);
+        RCLCPP_INFO(get_logger(), "min_inlier_ratio:                %.3f", config.min_inlier_ratio);
+        RCLCPP_INFO(get_logger(), "min_inlier_count:                %.1f", config.min_inlier_count);
+        RCLCPP_INFO(get_logger(), "ransac_mad_scale:                %.3f", config.ransac_mad_scale);
     }
 
     // Set up ROS2 subscribers and publishers for IMU and radar point clouds.
@@ -285,6 +339,25 @@ private:
         // Update the current orientation quaternion
         q_current_ = tf2::Quaternion(q_out.x(), q_out.y(), q_out.z(), q_out.w());
 
+        // Build gravity-compensated acceleration in world frame for consistency checks.
+        const Eigen::Vector3d a_body(
+            imu_msg->linear_acceleration.x,
+            imu_msg->linear_acceleration.y,
+            imu_msg->linear_acceleration.z);
+        const Eigen::Quaterniond q_eig(q_out.w(), q_out.x(), q_out.y(), q_out.z());
+        Eigen::Vector3d a_world = q_eig * a_body;
+        if (imu_accel_has_gravity_) {
+            a_world -= Eigen::Vector3d(0.0, 0.0, 9.80665);
+        }
+
+        const double alpha = std::clamp(accel_lpf_alpha_, 0.0, 1.0);
+        if (!has_filtered_accel_) {
+            accel_world_filtered_ = a_world;
+            has_filtered_accel_ = true;
+        } else {
+            accel_world_filtered_ = alpha * a_world + (1.0 - alpha) * accel_world_filtered_;
+        }
+
     }
 
     // Radar point cloud callback for filtering and processing radar data
@@ -365,13 +438,65 @@ private:
 
         // Estimate ego velocity using the radar ego-velocity estimator
         if (estimator_->estimate(pc2_raw_msg, pitch, roll, yaw, holonomic_vehicle_, ground_vehicle_, v_radar, sigma_v_radar, inlier_radar_msg, outlier_radar_msg)) {
-            // Publish the estimated twist with covariance
-            geometry_msgs::msg::TwistWithCovarianceStamped twist_msg;
-            twist_msg.header.stamp = pc2_raw_msg.header.stamp;
-            twist_msg.twist.twist.linear.x = v_radar.x();
-            twist_msg.twist.twist.linear.y = v_radar.y();
-            twist_msg.twist.twist.linear.z = v_radar.z();
-            twist_publisher_->publish(twist_msg);
+            bool accel_consistency_ok = true;
+            bool velocity_sanity_ok = true;
+            if (use_velocity_sanity_gate_) {
+                const bool finite =
+                    std::isfinite(v_radar.x()) && std::isfinite(v_radar.y()) && std::isfinite(v_radar.z());
+                const double v_norm = v_radar.norm();
+                const bool bounded =
+                    std::fabs(v_radar.x()) <= max_speed_x_ &&
+                    std::fabs(v_radar.y()) <= max_speed_y_ &&
+                    std::fabs(v_radar.z()) <= max_speed_z_ &&
+                    v_norm <= max_speed_norm_;
+                if (!finite || !bounded) {
+                    velocity_sanity_ok = false;
+                    RCLCPP_WARN(
+                        get_logger(),
+                        "Rejected ego-velocity by sanity gate: vx=%.3f vy=%.3f vz=%.3f |v|=%.3f",
+                        v_radar.x(), v_radar.y(), v_radar.z(), v_norm);
+                }
+            }
+            if (use_accel_consistency_gate_ && has_last_velocity_world_ && has_filtered_accel_) {
+                const rclcpp::Time t_now(pc2_raw_msg.header.stamp);
+                const double dt = (t_now - last_velocity_stamp_).seconds();
+                if (dt >= accel_gate_dt_min_ && dt <= accel_gate_dt_max_) {
+                    const Eigen::Quaterniond q_world_body(
+                        q_current_.w(), q_current_.x(), q_current_.y(), q_current_.z());
+                    const Eigen::Vector3d v_world_est = q_world_body * v_radar;
+                    const Eigen::Vector3d a_world_used = accel_world_filtered_;
+                    const Eigen::Vector3d v_world_pred = last_velocity_world_ + a_world_used * dt;
+
+                    const double innovation = (v_world_est - v_world_pred).norm();
+                    const double accel_norm = std::min(accel_max_norm_, a_world_used.norm());
+                    const double expected_dv = accel_norm * dt;
+                    const double gate = accel_consistency_bias_ + accel_consistency_gain_ * expected_dv;
+                    if (innovation > gate) {
+                        accel_consistency_ok = false;
+                        RCLCPP_WARN(
+                            get_logger(),
+                            "Rejected ego-velocity by IMU gate: innovation=%.3f m/s, gate=%.3f m/s (dt=%.3f s)",
+                            innovation, gate, dt);
+                    }
+                }
+            }
+
+            if (velocity_sanity_ok && accel_consistency_ok) {
+                // Publish the estimated twist with covariance
+                geometry_msgs::msg::TwistWithCovarianceStamped twist_msg;
+                twist_msg.header.stamp = pc2_raw_msg.header.stamp;
+                twist_msg.header.frame_id = "base_link";
+                twist_msg.twist.twist.linear.x = v_radar.x();
+                twist_msg.twist.twist.linear.y = v_radar.y();
+                twist_msg.twist.twist.linear.z = v_radar.z();
+                twist_publisher_->publish(twist_msg);
+
+                const Eigen::Quaterniond q_world_body(
+                    q_current_.w(), q_current_.x(), q_current_.y(), q_current_.z());
+                last_velocity_world_ = q_world_body * v_radar;
+                last_velocity_stamp_ = rclcpp::Time(pc2_raw_msg.header.stamp);
+                has_last_velocity_world_ = true;
+            }
         } else {
             RCLCPP_WARN(this->get_logger(), "Velocity estimation failed.");
         }
@@ -403,7 +528,7 @@ private:
         filtered_cloud_msg.header.frame_id = "base_link";
         radar_filtered_publisher_->publish(filtered_cloud_msg);
 
-        RCLCPP_WARN(this->get_logger(), "Filtered cloud has %d points", filtered_cloud->points.size());
+        //RCLCPP_WARN(this->get_logger(), "Filtered cloud has %d points", filtered_cloud->points.size());
 
         // Update previous orientation
         q_previous_ = q_current_;
@@ -452,10 +577,28 @@ private:
     bool enable_dynamic_object_removal_;
     bool holonomic_vehicle_;
     bool ground_vehicle_;
+    bool use_accel_consistency_gate_;
+    bool imu_accel_has_gravity_;
+    bool use_velocity_sanity_gate_;
     double distance_near_thresh_;
     double distance_far_thresh_;
     double z_low_thresh_;
     double z_high_thresh_;
+    double accel_lpf_alpha_;
+    double accel_consistency_gain_;
+    double accel_consistency_bias_;
+    double accel_max_norm_;
+    double accel_gate_dt_min_;
+    double accel_gate_dt_max_;
+    double max_speed_norm_;
+    double max_speed_x_;
+    double max_speed_y_;
+    double max_speed_z_;
+    bool has_filtered_accel_ = false;
+    bool has_last_velocity_world_ = false;
+    Eigen::Vector3d accel_world_filtered_ = Eigen::Vector3d::Zero();
+    Eigen::Vector3d last_velocity_world_ = Eigen::Vector3d::Zero();
+    rclcpp::Time last_velocity_stamp_;
 };
 
 int main(int argc, char **argv) {

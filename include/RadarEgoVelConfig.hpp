@@ -26,5 +26,8 @@ namespace rio {
     float success_prob;
     float N_ransac_points;
     float inlier_thresh;
+    float min_inlier_ratio;
+    float min_inlier_count;
+    float ransac_mad_scale;
   };
 }
