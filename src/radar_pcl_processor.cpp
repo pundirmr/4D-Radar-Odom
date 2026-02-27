@@ -31,6 +31,13 @@ public:
     }
 
 private:
+    static bool hasPointCloudData(const sensor_msgs::msg::PointCloud2 &msg) {
+        return msg.width > 0 &&
+               msg.height > 0 &&
+               msg.point_step > 0 &&
+               !msg.fields.empty() &&
+               !msg.data.empty();
+    }
 
 
     void declareParams()
@@ -451,10 +458,10 @@ private:
                     v_norm <= max_speed_norm_;
                 if (!finite || !bounded) {
                     velocity_sanity_ok = false;
-                    RCLCPP_WARN(
-                        get_logger(),
-                        "Rejected ego-velocity by sanity gate: vx=%.3f vy=%.3f vz=%.3f |v|=%.3f",
-                        v_radar.x(), v_radar.y(), v_radar.z(), v_norm);
+                    // RCLCPP_WARN(
+                    //     get_logger(),
+                    //     "Rejected ego-velocity by sanity gate: vx=%.3f vy=%.3f vz=%.3f |v|=%.3f",
+                    //     v_radar.x(), v_radar.y(), v_radar.z(), v_norm);
                 }
             }
             if (use_accel_consistency_gate_ && has_last_velocity_world_ && has_filtered_accel_) {
@@ -473,10 +480,10 @@ private:
                     const double gate = accel_consistency_bias_ + accel_consistency_gain_ * expected_dv;
                     if (innovation > gate) {
                         accel_consistency_ok = false;
-                        RCLCPP_WARN(
-                            get_logger(),
-                            "Rejected ego-velocity by IMU gate: innovation=%.3f m/s, gate=%.3f m/s (dt=%.3f s)",
-                            innovation, gate, dt);
+                        // RCLCPP_WARN(
+                        //     get_logger(),
+                        //     "Rejected ego-velocity by IMU gate: innovation=%.3f m/s, gate=%.3f m/s (dt=%.3f s)",
+                        //     innovation, gate, dt);
                     }
                 }
             }
@@ -498,25 +505,45 @@ private:
                 has_last_velocity_world_ = true;
             }
         } else {
-            RCLCPP_WARN(this->get_logger(), "Velocity estimation failed.");
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "Velocity estimation failed.");
         }
 
-        // Process inlier radar point cloud
+        // Process inlier/raw radar point cloud for filtering and publishing.
+        if (!hasPointCloudData(pc2_raw_msg)) {
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "Raw radar cloud is empty. Skipping.");
+            q_previous_ = q_current_;
+            return;
+        }
+
         pcl::PointCloud<pcl::PointXYZI>::Ptr radar_cloud_inlier(new pcl::PointCloud<pcl::PointXYZI>);
         pcl::PointCloud<pcl::PointXYZI>::Ptr radar_cloud_raw_(new pcl::PointCloud<pcl::PointXYZI>);
-        pcl::fromROSMsg(inlier_radar_msg, *radar_cloud_inlier);
         pcl::fromROSMsg(pc2_raw_msg, *radar_cloud_raw_);
 
         // Choose source cloud based on dynamic object removal flag
         pcl::PointCloud<pcl::PointXYZI>::ConstPtr source_cloud;
         if (enable_dynamic_object_removal_) {
-            source_cloud = radar_cloud_inlier;
+            if (hasPointCloudData(inlier_radar_msg)) {
+                pcl::fromROSMsg(inlier_radar_msg, *radar_cloud_inlier);
+                source_cloud = radar_cloud_inlier;
+            } else {
+                // Avoid flooding from PCL "No data to copy" by not converting empty inlier clouds.
+                RCLCPP_WARN_THROTTLE(
+                    this->get_logger(), *this->get_clock(), 2000,
+                    "Inlier radar cloud is empty. Falling back to raw cloud.");
+                source_cloud = radar_cloud_raw_;
+            }
         } else {
             source_cloud = radar_cloud_raw_;
         }
 
         if (source_cloud->empty()) {
-            RCLCPP_WARN(this->get_logger(), "Source cloud is empty. Skipping.");
+            RCLCPP_WARN_THROTTLE(
+                this->get_logger(), *this->get_clock(), 2000,
+                "Source cloud is empty. Skipping.");
             return;
         }
 

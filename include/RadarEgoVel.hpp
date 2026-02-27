@@ -253,10 +253,10 @@ namespace rio {
           }
         }
 
-        RCLCPP_INFO(rclcpp::get_logger("RadarEgoVel"),
-        "  RANSAC returned %s, inliers=%zu, outliers=%zu",
-        success?"SUCCESS":"FAILURE",
-        inlier_idx_best.size(), outlier_idx_best.size());
+        // RCLCPP_INFO(rclcpp::get_logger("RadarEgoVel"),
+        // "  RANSAC returned %s, inliers=%zu, outliers=%zu",
+        // success?"SUCCESS":"FAILURE",
+        // inlier_idx_best.size(), outlier_idx_best.size());
 
         // Collect inliers and outliers
         for (const auto& idx : inlier_idx_best)
