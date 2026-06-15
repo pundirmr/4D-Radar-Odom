@@ -95,7 +95,7 @@ Follow these steps to install the `radar_odom` package:
     ```bash
     mkdir radar_odom
     cd pose_slam
-    git clone https://github.com/LuciaCoto/Radar_Odom.git .
+    git clone https://github.com/robotics-upo/4D-Radar-Odom.git .
     ```
 
 2. **Build the package**:
